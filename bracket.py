@@ -15,7 +15,24 @@ async def generate_bracket(teams: list[dict]):
     size = 1
     while size < len(teams):
         size *= 2
-    slots = teams + [None] * (size - len(teams))
+
+    # Distribute byes one-per-match instead of piling them at the end of the
+    # slot list. If byes were simply appended after the shuffled teams, any
+    # time 2+ byes were needed, two of them could land in the same round-1
+    # match, producing a match with BOTH slots empty. That match can never
+    # produce a winner, so the bracket slot depending on it would stay
+    # unfilled forever and the tournament would stall. Since `size` is the
+    # smallest power of two >= len(teams), the number of byes is always
+    # strictly less than the number of round-1 matches (size // 2), so a
+    # one-bye-per-match distribution is always possible.
+    num_matches = size // 2
+    byes = size - len(teams)
+    slots = [None] * size
+    team_iter = iter(teams)
+    for i in range(num_matches):
+        slots[2 * i] = next(team_iter)
+        if i >= byes:
+            slots[2 * i + 1] = next(team_iter)
 
     total_rounds = size.bit_length() - 1  # size=1 -> 0 rounds (only 1 team, edge case)
     if total_rounds == 0:
@@ -51,14 +68,24 @@ async def generate_bracket(teams: list[dict]):
             next_id = ids_by_round[r + 1][pos // 2]
             await db.update_match(match_id, next_match_id=next_id, next_slot=pos % 2)
 
-    # Resolve byes in round 1 (team present but opponent missing -> auto win)
+    # Resolve byes in round 1 (team present but opponent missing -> auto win).
+    # NOTE: when 2+ byes are adjacent (positions 2k and 2k+1), both of their
+    # winners feed into the SAME round-2 match. advance_winner() tells us when
+    # that match becomes fully populated (both slots filled) via its return
+    # value - we must capture and surface that, otherwise that match would
+    # silently sit fully-populated-but-never-announced, since it isn't itself
+    # a round-1 match and the loop below only inspects round 1.
     ready_matches = []
     for match_id in ids_by_round[1]:
         m = await db.get_match(match_id)
         if m["team1_id"] and not m["team2_id"]:
-            await advance_winner(match_id, m["team1_id"])
+            propagated = await advance_winner(match_id, m["team1_id"])
+            if propagated:
+                ready_matches.append(propagated)
         elif m["team2_id"] and not m["team1_id"]:
-            await advance_winner(match_id, m["team2_id"])
+            propagated = await advance_winner(match_id, m["team2_id"])
+            if propagated:
+                ready_matches.append(propagated)
         elif m["team1_id"] and m["team2_id"]:
             ready_matches.append(match_id)
         # if both empty, nothing to do (shouldn't normally happen)
