@@ -1,7 +1,8 @@
+import os
 import aiosqlite
 from datetime import datetime
 
-DB_PATH = "tournament.db"
+DB_PATH = os.getenv("DT_PATH", "tournament.db")
 
 
 async def init_db():
